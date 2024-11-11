@@ -1,0 +1,4 @@
+<packages>
+  <depend version_eq="3.12.4-1ubuntu7.22.04.1">protobuf</depend>
+  <depend version_eq="3.12.4-1ubuntu7.22.04.1">protobuf-dev</depend>
+</packages>

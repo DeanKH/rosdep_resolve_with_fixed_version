@@ -3,13 +3,14 @@ Copyright (c) 2024 Dean.K
 Distributed under the MIT License (http://opensource.org/licenses/MIT)
 """
 
-import argparse
+from optparse import OptionParser
 import glob
 import xml.etree.ElementTree as ET
 from typing import Dict, List
 import subprocess
 import os
 import re
+import sys
 
 dependency_tags: List[str] = [
   'build_depend',
@@ -33,9 +34,14 @@ unsupported_version_attributes: List[str] = [
   'version_lt'
 ]
 
-def rosdep_key_and_resolve(path: str):
-  command = ['rosdep', 'keys', '--ignore-src', '--from-paths', f'"{path}"', '|', 'xargs', 'rosdep', 'resolve', '--rosdistro', f'{os.environ["ROS_DISTRO"]}']
-  # 
+def rosdep_key_and_resolve(path: str, dependency_types: List[str]):
+  dependncy_str = ''
+  if len(dependency_types) != 0:
+    for dep_type in dependency_types:
+      dependncy_str += f'--dependency-types {dep_type} '
+
+  command = ['rosdep', 'keys', '--ignore-src', '--from-paths', f'"{path}"', f'{dependncy_str}', '|', 'xargs', 'rosdep', 'resolve', '--rosdistro', f'{os.environ["ROS_DISTRO"]}']
+  print('running rosdep command: ', ' '.join(command))
   result = subprocess.run(' '.join(command), shell=True, capture_output=True, text=True, env=os.environ)
   if result.returncode == 0:
     print("Command succeeded:\n", result.stdout)
@@ -46,10 +52,10 @@ def rosdep_key_and_resolve(path: str):
   return lines
 
 class RosdepResolvedPackageInfo:
-  def __init__(self, ros_pkg_name: str, method: str, resolved_name: str):
+  def __init__(self, ros_pkg_name: str, method: str, resolved_names: List[str]):
     self.ros_pkg_name: str = ros_pkg_name
     self.method: str = method
-    self.resolved_name: str = resolved_name
+    self.resolved_names: List[str] = resolved_names
     self.target_versions: List[str] = []
       
 def parse_rosdep(lines: List[str]) -> Dict[str, RosdepResolvedPackageInfo]:
@@ -61,7 +67,7 @@ def parse_rosdep(lines: List[str]) -> Dict[str, RosdepResolvedPackageInfo]:
   for line in lines:
     rosdep_head_match = rosdep_head_pattern.search(line)
     if rosdep_head_match:      
-      package_info_list.append(RosdepResolvedPackageInfo(rosdep_head_match.group(1), method='', resolved_name=''))
+      package_info_list.append(RosdepResolvedPackageInfo(rosdep_head_match.group(1), method='', resolved_names=[]))
       continue
     package_install_method_match = method_pattern.search(line)
     if package_install_method_match:
@@ -72,7 +78,7 @@ def parse_rosdep(lines: List[str]) -> Dict[str, RosdepResolvedPackageInfo]:
     else:
       if len(package_info_list) == 0:
         raise RuntimeError(f'Error: resolved package name found before package name in rosdep result')
-      package_info_list[-1].resolved_name = line
+      package_info_list[-1].resolved_names = line.split(' ')
 
   # convert list to dict with key as ros_pkg_name
   package_info_dict = {package.ros_pkg_name: package for package in package_info_list}
@@ -100,57 +106,66 @@ def extract_fixed_version_depend_from_package_xml(path: str) -> Dict[str, str]:
           dependencies[dep.text] = dep.attrib[attr]
   return dependencies
 
-def main():
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--from-paths", type=str, default="/home/dean/workspace/ros2/ufactorylite_ws/src/xarm_ros2") # , required=True
-  # output
-  parser.add_argument("--output-apt", type=str, default="", required=False)
-  parser.add_argument("--output-pip", type=str, default="", required=False)
+def main(args):
+  parser = OptionParser(usage='', prog='rosdep-with-v')
+  parser.add_option("--fixed-package-list", dest='fixed_package_xml', type=str, default="")
+  parser.add_option("--from-paths", dest='from_paths', type=str, default="") # , required=True
+  parser.add_option("--output-apt", dest='output_apt', type=str, default="")
+  parser.add_option("--output-pip", dest='output_pip', type=str, default="")
+  parser.add_option('--dependency-types', dest='dependency_types', default=[],action='append', choices=list({'build', 'buildtool', 'build_export', 'buildtool_export', 'exec', 'test', 'doc'}))
+  options, args = parser.parse_args(args)
+  options.dependency_types = [dep for s in options.dependency_types for dep in s.split(' ')]
 
-  args = parser.parse_args()
-  print(f'root path: {args.from_paths}')
+  print(f'root path: {options.from_paths}')
 
-  rosdep_result = rosdep_key_and_resolve(args.from_paths)
+  rosdep_result = rosdep_key_and_resolve(options.from_paths, options.dependency_types)
   resolved_package_list =  parse_rosdep(rosdep_result)
   for key, package in resolved_package_list.items():
-    print(f"Resolved package: {package.ros_pkg_name} version {package.target_versions} by {package.method} as {package.resolved_name}")
+    print(f"Resolved package: {package.ros_pkg_name} version {package.target_versions} by {package.method} as {package.resolved_names}")
 
-  package_xmls = collect_package_xml_path(args.from_paths)
-  for package_xml in package_xmls:
-    print(f"Found package.xml at {package_xml}")
-    fixed_version_depends = extract_fixed_version_depend_from_package_xml(package_xml)
+  # package_xmls = collect_package_xml_path(options.from_paths)
+  # for package_xml in package_xmls:
+  # print(f"Found package.xml at {package_xml}")
+
+  if len(options.fixed_package_xml) != 0:
+    fixed_version_depends = extract_fixed_version_depend_from_package_xml(options.fixed_package_xml)
     print(fixed_version_depends)
     for key, value in fixed_version_depends.items():
       if not key in resolved_package_list.keys():
-        print(f"WARNING: Dependency {key} not resolved by rosdep")
         continue
       resolved_package_list[key].target_versions.append(value)
   
   print('----------------')
   for key, package in resolved_package_list.items():
-    print(f"Resolved package: {package.ros_pkg_name} version {package.target_versions} by {package.method} as {package.resolved_name}")
+    print(f"Resolved package: {package.ros_pkg_name} version {package.target_versions} by {package.method} as {package.resolved_names}")
 
 
-  if args.output_apt != '':
-    with open(args.output_apt, 'w') as f:
+  if options.output_apt != '':
+    with open(options.output_apt, 'w') as f:
       for key, package in resolved_package_list.items():
         if package.method == 'apt':
+          text = ''
           if len(package.target_versions) == 0:
-            text = f"{package.resolved_name}\n"
+            for item in package.resolved_names:
+              text += f"{item}\n"
           elif len(package.target_versions) == 1:
-            text = f"{package.resolved_name}={package.target_versions[0]}\n"
+            for item in package.resolved_names:
+              text += f"{item}={package.target_versions[0]}\n"
           else:
             print(f"Error: Multiple target versions found for apt package {package.ros_pkg_name}")
             raise RuntimeError(f"Error: Multiple target versions found for apt package {package.ros_pkg_name}")
           f.write(text)
-  if args.output_pip != '':
-    with open(args.output_pip, 'w') as f:
+  if options.output_pip != '':
+    with open(options.output_pip, 'w') as f:
       for key, package in resolved_package_list.items():
         if package.method == 'pip':
+          text = ''
           if len(package.target_versions) == 0:
-            text = f"{package.resolved_name}\n"
+            for item in package.resolved_names:
+              text += f"{item}\n"
           elif len(package.target_versions) == 1:
-            text = f"{package.resolved_name}=={package.target_versions[0]}\n"
+            for item in package.resolved_names:
+              text += f"{item}=={package.target_versions[0]}\n"
           else:
             print(f"Error: Multiple target versions found for apt package {package.ros_pkg_name}")
             raise RuntimeError(f"Error: Multiple target versions found for apt package {package.ros_pkg_name}")
@@ -158,7 +173,7 @@ def main():
 
 if __name__ == "__main__":
   try:
-    main()
+    main(sys.argv[1:])
   except Exception as e:
     print(e)
     exit(1)
