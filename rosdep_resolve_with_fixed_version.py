@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Copyright (c) 2024 Dean.K
 Distributed under the MIT License (http://opensource.org/licenses/MIT)
